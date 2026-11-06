@@ -1,0 +1,6 @@
+{
+  "name": "Questões Brasil",
+  "description": "Plataforma completa e inteligente de questões de concursos públicos brasileiros com filtros avançados, cadernos, simulados e central de coleta de provas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
