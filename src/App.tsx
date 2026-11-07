@@ -39,6 +39,7 @@ import {
   INITIAL_INVITATIONS,
   INITIAL_AUDIT_LOGS,
 } from './data/mockDatabase';
+import { supabaseService } from './lib/supabaseService';
 import { filterQuestions } from './utils/filterEngine';
 import { calculateStreak, calculateAccuracy } from './utils/scoring';
 
@@ -183,8 +184,24 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 10;
 
-  // Sync with backend API on mount if available
+  // Sync with Supabase or Express backend on mount
   useEffect(() => {
+    // 1. Try Supabase directly if credentials provided
+    if (supabaseService.isConfigured()) {
+      supabaseService.getQuestions().then(sbQuestions => {
+        if (sbQuestions && sbQuestions.length > 0) {
+          setQuestions(sbQuestions);
+        }
+      });
+      supabaseService.getNotebooks(currentUserId).then(sbNotebooks => {
+        if (sbNotebooks && sbNotebooks.length > 0) {
+          setNotebooks(sbNotebooks);
+        }
+      });
+      return;
+    }
+
+    // 2. Otherwise fetch from local API server
     fetch('/api/questions')
       .then(res => res.json())
       .then(data => {
@@ -193,9 +210,9 @@ export default function App() {
         }
       })
       .catch(() => {
-        // Fallback to local state if backend route is compiling
+        // Safe fallback to INITIAL_QUESTIONS
       });
-  }, []);
+  }, [currentUserId]);
 
   // Compute attempts for current user
   const currentUserAttempts = useMemo(() => {
@@ -386,17 +403,28 @@ export default function App() {
       })
     );
 
-    // POST to backend API in background
-    fetch('/api/attempts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    // Persist to Supabase if configured
+    if (supabaseService.isConfigured()) {
+      supabaseService.recordAttempt({
         userId: currentUserId,
         questionId,
         selectedOptionId,
+        isCorrect,
         timeSpentSeconds,
-      }),
-    }).catch(() => {});
+      });
+    } else {
+      // POST to backend API in background
+      fetch('/api/attempts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUserId,
+          questionId,
+          selectedOptionId,
+          timeSpentSeconds,
+        }),
+      }).catch(() => {});
+    }
   };
 
   const handleToggleFavorite = (questionId: string) => {
@@ -442,6 +470,10 @@ export default function App() {
         return nb;
       })
     );
+
+    if (supabaseService.isConfigured()) {
+      supabaseService.addQuestionToNotebook(notebookId, questionId);
+    }
   };
 
   const handleStudyNotebook = (notebookId: string) => {
@@ -462,6 +494,15 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     };
     setNotebooks(prev => [newNb, ...prev]);
+
+    if (supabaseService.isConfigured()) {
+      supabaseService.createNotebook({
+        userId: currentUserId,
+        title,
+        description,
+        color,
+      });
+    }
   };
 
   const handleDeleteNotebook = (notebookId: string) => {
