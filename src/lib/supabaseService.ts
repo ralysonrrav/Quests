@@ -1,8 +1,119 @@
-import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { supabase, isSupabaseConfigured, supabaseUrl } from './supabaseClient';
 import { Question, UserProfile, Notebook, Simulation, QuestionAttempt } from '../types';
+
+export interface SupabaseHealthCheckResult {
+  isConfigured: boolean;
+  status: 'connected' | 'schema_missing' | 'error' | 'not_configured';
+  url: string;
+  maskedKey: string;
+  latencyMs?: number;
+  message: string;
+  details?: string;
+  tablesFound?: {
+    questions: boolean;
+    profiles: boolean;
+    notebooks: boolean;
+  };
+  totalQuestionsCount?: number;
+}
 
 export const supabaseService = {
   isConfigured: () => isSupabaseConfigured,
+
+  // -------------------------------------------------------------
+  // HEALTH CHECK / CONNECTION TEST
+  // -------------------------------------------------------------
+  async testConnection(): Promise<SupabaseHealthCheckResult> {
+    const url = supabaseUrl || import.meta.env.VITE_SUPABASE_URL || '';
+    const key = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+    const maskedKey = key
+      ? `${key.slice(0, 8)}...${key.slice(-6)}`
+      : 'Não informada';
+
+    if (!isSupabaseConfigured || !supabase) {
+      return {
+        isConfigured: false,
+        status: 'not_configured',
+        url: url || 'Não configurada (adicione VITE_SUPABASE_URL no .env)',
+        maskedKey,
+        message: 'Credenciais do Supabase não configuradas no arquivo de ambiente (.env ou Vercel).',
+        details: 'Adicione VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para habilitar a conexão persistente com o PostgreSQL.',
+      };
+    }
+
+    const start = performance.now();
+    try {
+      // Test queries with .limit(1) to detect actual table schema presence
+      const [qRes, profRes, notebRes] = await Promise.all([
+        supabase.from('questions').select('id', { count: 'exact' }).limit(1),
+        supabase.from('profiles').select('id').limit(1),
+        supabase.from('notebooks').select('id').limit(1),
+      ]);
+
+      const latencyMs = Math.round(performance.now() - start);
+
+      const isQTableMissing = qRes.error?.code === 'PGRST205';
+      const isProfTableMissing = profRes.error?.code === 'PGRST205';
+      const isNotebTableMissing = notebRes.error?.code === 'PGRST205';
+
+      const tablesFound = {
+        questions: !qRes.error,
+        profiles: !profRes.error,
+        notebooks: !notebRes.error,
+      };
+
+      // If tables are missing (PGRST205), credentials and endpoint work, but schema migrations are pending
+      if (isQTableMissing || isProfTableMissing || isNotebTableMissing) {
+        return {
+          isConfigured: true,
+          status: 'schema_missing',
+          url,
+          maskedKey,
+          latencyMs,
+          message: 'Conexão com o Supabase estabelecida! Tabelas aguardando migração SQL.',
+          details:
+            'A URL e a Chave Anônima estão respondendo perfeitamente, mas a tabela "questions" ainda não existe no catálogo público do PostgreSQL. Para criá-la com todas as regras RLS e dados iniciais, acesse o SQL Editor do seu projeto Supabase e execute o arquivo "supabase/migrations/20261106000001_initial_schema.sql".',
+          tablesFound,
+          totalQuestionsCount: 0,
+        };
+      }
+
+      if (qRes.error) {
+        return {
+          isConfigured: true,
+          status: 'error',
+          url,
+          maskedKey,
+          latencyMs,
+          message: 'Falha ao consultar banco de dados no Supabase.',
+          details: qRes.error.message || qRes.error.details || 'Possível tabela inexistente ou política RLS bloqueando leitura.',
+          tablesFound,
+        };
+      }
+
+      return {
+        isConfigured: true,
+        status: 'connected',
+        url,
+        maskedKey,
+        latencyMs,
+        message: 'Conexão ativa e tabelas homologadas no Supabase PostgreSQL!',
+        totalQuestionsCount: qRes.count ?? 0,
+        tablesFound,
+      };
+    } catch (err: any) {
+      const latencyMs = Math.round(performance.now() - start);
+      return {
+        isConfigured: true,
+        status: 'error',
+        url,
+        maskedKey,
+        latencyMs,
+        message: 'Erro de rede ou conexão recusada pelo Supabase.',
+        details: err?.message || 'Verifique se o URL do projeto e a chave anônima estão corretos.',
+      };
+    }
+  },
 
   // -------------------------------------------------------------
   // QUESTIONS & OPTIONS

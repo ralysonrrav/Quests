@@ -23,6 +23,7 @@ import {
   GitPullRequest,
   Fingerprint,
 } from 'lucide-react';
+import { DatabaseStatusCard } from './DatabaseStatusCard';
 import {
   UserProfile,
   UserRole,
@@ -181,6 +182,9 @@ export const AdminHub: React.FC<AdminHubProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Database Connection & Health Check Component */}
+      <DatabaseStatusCard />
 
       {/* ======================================================== */}
       {/* TAB 1: CENTRAL DE COLETA DE PROVAS                       */}
