@@ -73,13 +73,13 @@ export default function App() {
 
   // User state
   const [allUsers, setAllUsers] = useState<UserProfile[]>(INITIAL_USERS);
-  const [currentUserId, setCurrentUserId] = useState<string>('user-student-01');
+  const [currentUserId, setCurrentUserId] = useState<string>('user-superadmin-01');
   const currentUser = useMemo(() => {
-    return allUsers.find(u => u.id === currentUserId) || allUsers[2];
+    return allUsers.find(u => u.id === currentUserId) || allUsers[0];
   }, [allUsers, currentUserId]);
 
   // Main Active Tab
-  const [activeTab, setActiveTab] = useState<string>('questoes');
+  const [activeTab, setActiveTab] = useState<string>('admin');
 
   // Question catalog state
   const [questions, setQuestions] = useState<Question[]>(INITIAL_QUESTIONS);
@@ -541,19 +541,25 @@ export default function App() {
 
   // Admin Ingestion Trigger
   const handleTriggerIngestion = (jobData: any) => {
+    const count = jobData.generatedDrafts?.length || 8;
     const newJob: IngestionJob = {
       id: `job-${Date.now()}`,
-      title: jobData.title,
-      sourceId: jobData.sourceId,
+      title: jobData.title || `Ingestão ${jobData.board} — ${jobData.organization} (${jobData.year})`,
+      sourceId: jobData.sourceId || 'src-cebraspe',
       board: jobData.board,
       organization: jobData.organization,
       year: Number(jobData.year),
       status: 'revisao',
-      progressPercentage: 85,
-      sourceDocName: jobData.docName || 'PROVA_OFICIAL_DEFINITIVA.pdf',
-      sourceDocHash: '8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4',
-      extractedQuestionsCount: 15,
-      duplicatesFoundCount: 1,
+      progressPercentage: 100,
+      sourceDocName: jobData.examFileName || jobData.docName || 'CADERNO_PROVA.pdf',
+      sourceDocHash: jobData.examFileHash || '8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4',
+      examFileSize: jobData.examFileSize,
+      answerKeyDocName: jobData.answerKeyFileName || 'GABARITO_OFICIAL_DEFINITIVO.pdf',
+      answerKeyDocHash: jobData.answerKeyFileHash || 'ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb',
+      answerKeyType: jobData.answerKeyType || 'definitivo',
+      answerKeyFileSize: jobData.answerKeyFileSize,
+      extractedQuestionsCount: count,
+      duplicatesFoundCount: 0,
       approvedCount: 0,
       publishedCount: 0,
       createdBy: `${currentUser.name} (${currentUser.role})`,
@@ -562,26 +568,32 @@ export default function App() {
 
     setJobs(prev => [newJob, ...prev]);
 
-    // Append a realistic draft to review
-    const newDraft: ExtractedQuestionDraft = {
-      id: `draft-${Date.now()}`,
-      jobId: newJob.id,
-      numberInExam: 1,
-      statement: `No âmbito da ${jobData.organization}, os atos administrativos dotados de presunção de legitimidade podem ter sua eficácia suspensa liminarmente pelo Poder Judiciário em sede de Mandado de Segurança.`,
-      options: [
-        { id: 'C', text: 'Certo', isCorrect: true },
-        { id: 'E', text: 'Errado', isCorrect: false },
-      ],
-      suggestedDiscipline: 'Direito Administrativo',
-      suggestedTopic: 'Atos Administrativos',
-      suggestedSubtopic: 'Presunção de Legitimidade e Controle Judicial',
-      classificationConfidence: 97,
-      duplicateSimilarity: 25,
-      reviewStatus: 'pendente',
-      originalRawSnippet: `QUESTÃO 1\nJulgue a assertiva: No âmbito da Administração Pública, os atos com presunção de legitimidade admitem suspensão liminar judicial em mandado de segurança.`,
-    };
-
-    setDrafts(prev => [newDraft, ...prev]);
+    if (jobData.generatedDrafts && jobData.generatedDrafts.length > 0) {
+      const draftsWithJobId = jobData.generatedDrafts.map((d: ExtractedQuestionDraft) => ({
+        ...d,
+        jobId: newJob.id,
+      }));
+      setDrafts(prev => [...draftsWithJobId, ...prev]);
+    } else {
+      const newDraft: ExtractedQuestionDraft = {
+        id: `draft-${Date.now()}`,
+        jobId: newJob.id,
+        numberInExam: 1,
+        statement: `No âmbito da ${jobData.organization}, os atos administrativos dotados de presunção de legitimidade podem ter sua eficácia suspensa liminarmente pelo Poder Judiciário em sede de Mandado de Segurança.`,
+        options: [
+          { id: 'C', text: 'Certo', isCorrect: true },
+          { id: 'E', text: 'Errado', isCorrect: false },
+        ],
+        suggestedDiscipline: 'Direito Administrativo',
+        suggestedTopic: 'Atos Administrativos',
+        suggestedSubtopic: 'Presunção de Legitimidade e Controle Judicial',
+        classificationConfidence: 97,
+        duplicateSimilarity: 25,
+        reviewStatus: 'pendente',
+        originalRawSnippet: `QUESTÃO 1\nJulgue a assertiva: No âmbito da Administração Pública, os atos com presunção de legitimidade admitem suspensão liminar judicial em mandado de segurança.`,
+      };
+      setDrafts(prev => [newDraft, ...prev]);
+    }
 
     // Record in audit log
     const log: AuditLog = {
@@ -589,10 +601,10 @@ export default function App() {
       userId: currentUser.id,
       userName: currentUser.name,
       userRole: currentUser.role,
-      action: 'INGESTAO_INICIADA',
+      action: 'INGESTAO_DUPLO_PDF_INICIADA',
       entityType: 'INGESTION_JOB',
       entityId: newJob.id,
-      details: `Iniciado trabalho de ingestão para ${jobData.board} - ${jobData.organization}`,
+      details: `Upload e cruzamento concluídos: Prova (${newJob.sourceDocName}) e Gabarito (${newJob.answerKeyDocName}) da banca ${newJob.board} - ${newJob.organization}.`,
       ipAddress: '177.136.24.12',
       timestamp: new Date().toISOString(),
     };
@@ -612,14 +624,20 @@ export default function App() {
     const finalTopic = overrides?.topic || draft.suggestedTopic;
     const finalStatement = overrides?.statement || draft.statement;
 
+    const parentJob = jobs.find(j => j.id === draft.jobId);
+    const board = parentJob?.board || 'Cebraspe';
+    const organization = parentJob?.organization || 'Polícia Federal';
+    const examYear = parentJob?.year || 2024;
+    const examPosition = (parentJob as any)?.position || 'Agente';
+
     const newQuestion: Question = {
       id: `q-pub-${Date.now()}`,
-      code: `QB-2024-${finalDiscipline.slice(0, 3).toUpperCase()}-${String(draft.numberInExam).padStart(3, '0')}`,
-      board: 'FGV',
-      organization: 'Receita Federal',
-      examName: 'Auditor Fiscal 2024 (Homologada na Central)',
-      position: 'Auditor Fiscal',
-      year: 2024,
+      code: `QB-${examYear}-${finalDiscipline.slice(0, 3).toUpperCase()}-${String(draft.numberInExam).padStart(3, '0')}`,
+      board,
+      organization,
+      examName: `${board} - ${organization} (${examYear})`,
+      position: examPosition,
+      year: examYear,
       educationLevel: 'superior',
       discipline: finalDiscipline,
       topic: finalTopic,
@@ -633,12 +651,12 @@ export default function App() {
         isCorrect: opt.isCorrect,
         percentageChosen: opt.isCorrect ? 80 : 20,
       })),
-      correctOptionId: draft.options.find(o => o.isCorrect)?.id || 'E',
+      correctOptionId: draft.options.find(o => o.isCorrect)?.id || 'C',
       keyStatus: 'valida',
       explanation: {
         author: 'Prof. Revisor Titular',
         role: 'Banca Examinadora Questões Brasil',
-        text: `GABARITO OFICIAL HOMOLOGADO.\n\nQuestão analisada conforme jurisprudência pacífica dos Tribunais Superiores referente a ${finalTopic}.`,
+        text: `GABARITO OFICIAL HOMOLOGADO.\n\nQuestão analisada conforme jurisprudência pacífica dos Tribunais Superiores e legislação referente a ${finalTopic}.`,
         legalBasis: 'Legislação e Jurisprudência dos Tribunais',
         updatedAt: new Date().toISOString(),
       },
@@ -651,6 +669,13 @@ export default function App() {
 
     setQuestions(prev => [newQuestion, ...prev]);
     setDrafts(prev => prev.filter(d => d.id !== draftId));
+
+    // Persist to Supabase PostgreSQL if configured
+    if (supabaseService.isConfigured()) {
+      supabaseService.createQuestion(newQuestion).catch(err => {
+        console.warn('Aviso ao sincronizar questão homologada no Supabase:', err);
+      });
+    }
 
     const log: AuditLog = {
       id: `log-${Date.now()}`,

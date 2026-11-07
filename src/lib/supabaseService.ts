@@ -242,6 +242,65 @@ export const supabaseService = {
     }
   },
 
+  async createQuestion(question: Question): Promise<string | null> {
+    if (!supabase) return null;
+    try {
+      const { data: qData, error: qErr } = await supabase
+        .from('questions')
+        .insert({
+          code: question.code,
+          board: question.board,
+          organization: question.organization,
+          exam_name: question.examName,
+          position: question.position,
+          year: question.year,
+          education_level: question.educationLevel,
+          modality: question.modality,
+          difficulty: question.difficulty,
+          statement: question.statement,
+          support_text: question.supportText || null,
+          correct_option_id: question.correctOptionId,
+          key_status: question.keyStatus,
+          explanation_author: question.explanation.author,
+          explanation_role: question.explanation.role,
+          explanation_text: question.explanation.text,
+          explanation_legal_basis: question.explanation.legalBasis || null,
+          is_published: true,
+        })
+        .select('id')
+        .single();
+
+      if (qErr || !qData) {
+        console.warn('Aviso ao inserir questão no Supabase:', qErr?.message);
+        return null;
+      }
+
+      // Insert question options
+      if (question.options && question.options.length > 0) {
+        const optionRows = question.options.map(opt => ({
+          question_id: qData.id,
+          letter_id: opt.id,
+          option_text: opt.text,
+          is_correct: opt.isCorrect,
+          percentage_chosen: opt.percentageChosen || (opt.isCorrect ? 80 : 20),
+        }));
+
+        const { error: optErr } = await supabase
+          .from('question_options')
+          .insert(optionRows);
+
+        if (optErr) {
+          console.warn('Aviso ao inserir opções no Supabase:', optErr.message);
+        }
+      }
+
+      return qData.id;
+    } catch (err: any) {
+      console.warn('Exceção ao criar questão no Supabase:', err?.message || err);
+      return null;
+    }
+  },
+
   // -------------------------------------------------------------
   // RECORD QUESTION ATTEMPT (question_attempts table)
   // -------------------------------------------------------------

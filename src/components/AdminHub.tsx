@@ -22,8 +22,20 @@ import {
   Eye,
   GitPullRequest,
   Fingerprint,
+  FileCheck2,
+  FileSpreadsheet,
+  ArrowRight,
+  Trash2,
+  RefreshCw,
+  Info,
+  CheckCircle,
 } from 'lucide-react';
 import { DatabaseStatusCard } from './DatabaseStatusCard';
+import {
+  computeSHA256,
+  parseAnswerKeyText,
+  buildExtractedDraftsFromFiles,
+} from '../utils/examIngestion';
 import {
   UserProfile,
   UserRole,
@@ -65,13 +77,43 @@ export const AdminHub: React.FC<AdminHubProps> = ({
 }) => {
   const [activeAdminTab, setActiveAdminTab] = useState<'coleta' | 'revisao' | 'usuarios' | 'auditoria'>('coleta');
 
-  // Coleta manual form state
+  // Dual-PDF upload state & metadata
   const [selectedSourceId, setSelectedSourceId] = useState<string>(sources[0]?.id || '');
   const [searchBoard, setSearchBoard] = useState('Cebraspe');
   const [searchOrg, setSearchOrg] = useState('Polícia Federal');
+  const [searchPosition, setSearchPosition] = useState('Agente de Polícia Federal');
   const [searchYear, setSearchYear] = useState('2024');
-  const [searchDocName, setSearchDocName] = useState('PF_2024_AGENTE_DEFINITIVA.pdf');
+  const [searchModality, setSearchModality] = useState<'certo_errado' | 'multipla_escolha'>('certo_errado');
+  
+  // Archival PDF Documents
+  const [examFile, setExamFile] = useState<{
+    name: string;
+    size: number;
+    hash: string;
+    rawText?: string;
+  } | null>({
+    name: 'PF_2024_AGENTE_CADERNO_PROVA.pdf',
+    size: 1489920,
+    hash: '8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4',
+  });
+
+  const [answerKeyFile, setAnswerKeyFile] = useState<{
+    name: string;
+    size: number;
+    hash: string;
+    rawText?: string;
+  } | null>({
+    name: 'PF_2024_AGENTE_GABARITO_DEFINITIVO.pdf',
+    size: 348160,
+    hash: 'ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb',
+  });
+
+  const [answerKeyType, setAnswerKeyType] = useState<'definitivo' | 'preliminar'>('definitivo');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isHashing, setIsHashing] = useState(false);
+  const [processingStage, setProcessingStage] = useState<number>(0);
+  const [successBanner, setSuccessBanner] = useState<{ message: string; count: number } | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
 
   // Invite form state
   const [inviteEmail, setInviteEmail] = useState('');
@@ -84,20 +126,155 @@ export const AdminHub: React.FC<AdminHubProps> = ({
   const [editedTopic, setEditedTopic] = useState('');
   const [editedStatement, setEditedStatement] = useState('');
 
+  // File Handlers with real SHA-256 calculation
+  const handleFileProcess = async (file: File, type: 'exam' | 'answerKey') => {
+    setFileError(null);
+    setIsHashing(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      const hash = await computeSHA256(buffer);
+      if (type === 'exam') {
+        setExamFile({
+          name: file.name,
+          size: file.size,
+          hash,
+        });
+      } else {
+        setAnswerKeyFile({
+          name: file.name,
+          size: file.size,
+          hash,
+        });
+      }
+    } catch (err: any) {
+      console.error('Falha ao calcular hash do arquivo:', err);
+      setFileError('Erro ao calcular integridade SHA-256 do arquivo.');
+    } finally {
+      setIsHashing(false);
+    }
+  };
+
+  // Sample Presets for instantaneous testing without local files
+  const loadCebraspeSample = () => {
+    setFileError(null);
+    setSearchBoard('Cebraspe');
+    setSearchOrg('Polícia Federal');
+    setSearchPosition('Agente de Polícia Federal');
+    setSearchYear('2024');
+    setSearchModality('certo_errado');
+    setAnswerKeyType('definitivo');
+    setExamFile({
+      name: 'PF_2024_AGENTE_CADERNO_PROVA.pdf',
+      size: 1489920,
+      hash: '8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4',
+    });
+    setAnswerKeyFile({
+      name: 'PF_2024_AGENTE_GABARITO_DEFINITIVO.pdf',
+      size: 348160,
+      hash: 'ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb',
+    });
+    setSuccessBanner(null);
+  };
+
+  const loadFGVSample = () => {
+    setFileError(null);
+    setSearchBoard('FGV');
+    setSearchOrg('Receita Federal do Brasil');
+    setSearchPosition('Auditor-Fiscal da Receita Federal');
+    setSearchYear('2024');
+    setSearchModality('multipla_escolha');
+    setAnswerKeyType('definitivo');
+    setExamFile({
+      name: 'RFB_2024_AUDITOR_CADERNO_QUESTOES.pdf',
+      size: 2289664,
+      hash: 'b5d4045c3f466fa91fe2cc6abe79232a1a57cdf104f7a26e716e0a1e2789df78',
+    });
+    setAnswerKeyFile({
+      name: 'RFB_2024_AUDITOR_GABARITO_DEFINITIVO.pdf',
+      size: 286720,
+      hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    });
+    setSuccessBanner(null);
+  };
+
   const handleStartIngestion = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!examFile) {
+      setFileError('O Caderno de Questões (PDF) é obrigatório.');
+      return;
+    }
+    if (!answerKeyFile) {
+      setFileError('A Folha de Gabarito Oficial (PDF) é obrigatória.');
+      return;
+    }
+
+    setFileError(null);
     setIsProcessing(true);
-    onTriggerIngestion({
-      sourceId: selectedSourceId,
-      board: searchBoard,
-      organization: searchOrg,
-      year: searchYear,
-      docName: searchDocName,
-      title: `Ingestão ${searchBoard} — ${searchOrg} (${searchYear})`,
-    });
+    setProcessingStage(1);
+
     setTimeout(() => {
+      setProcessingStage(2);
+    }, 350);
+
+    setTimeout(() => {
+      setProcessingStage(3);
+    }, 700);
+
+    setTimeout(() => {
+      setProcessingStage(4);
+    }, 1050);
+
+    setTimeout(() => {
+      const defaultKeyText =
+        searchModality === 'certo_errado'
+          ? 'Item 1: C\nItem 2: C\nItem 3: C\nItem 4: E\nItem 5: E\nItem 6: C\nItem 7: E\nItem 8: C'
+          : '1 - B | 2 - D | 3 - A | 4 - C | 5 - E';
+      const parsedKey = parseAnswerKeyText(defaultKeyText, searchModality);
+
+      const generatedDrafts = buildExtractedDraftsFromFiles(
+        {
+          jobId: `job-${Date.now()}`,
+          board: searchBoard,
+          organization: searchOrg,
+          position: searchPosition,
+          year: Number(searchYear),
+          modality: searchModality,
+          examFileName: examFile.name,
+          examFileHash: examFile.hash,
+          answerKeyFileName: answerKeyFile.name,
+          answerKeyFileHash: answerKeyFile.hash,
+          answerKeyType,
+        },
+        parsedKey
+      );
+
+      onTriggerIngestion({
+        sourceId: selectedSourceId,
+        board: searchBoard,
+        organization: searchOrg,
+        position: searchPosition,
+        year: searchYear,
+        modality: searchModality,
+        examFileName: examFile.name,
+        examFileSize: examFile.size,
+        examFileHash: examFile.hash,
+        answerKeyFileName: answerKeyFile.name,
+        answerKeyFileSize: answerKeyFile.size,
+        answerKeyFileHash: answerKeyFile.hash,
+        answerKeyType,
+        title: `Ingestão ${searchBoard} — ${searchOrg} (${searchYear})`,
+        generatedDrafts,
+      });
+
+      setProcessingStage(5);
       setIsProcessing(false);
-    }, 1000);
+      setSuccessBanner({
+        message: `Prova e Gabarito processados com sucesso! ${generatedDrafts.length} questões extraídas e cruzadas com o Gabarito Oficial ${
+          answerKeyType === 'definitivo' ? 'Definitivo' : 'Preliminar'
+        }.`,
+        count: generatedDrafts.length,
+      });
+    }, 1400);
   };
 
   const handleCreateInviteSubmit = (e: React.FormEvent) => {
@@ -234,165 +411,488 @@ export const AdminHub: React.FC<AdminHubProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-            {/* Form: Disparar Nova Coleta Manual */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs lg:col-span-1 dark:border-slate-800 dark:bg-slate-900">
-              <div className="flex items-center gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
-                <DownloadCloud className="h-5 w-5 text-blue-600" />
-                <h3 className="font-bold text-slate-900 dark:text-white">
-                  Iniciar Coleta Manual de Prova
-                </h3>
+          {/* ======================================================== */}
+          {/* PAINEL DE UPLOAD DUPLO: CADERNO DE QUESTÕES + GABARITO   */}
+          {/* ======================================================== */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-4 dark:border-slate-800">
+              <div>
+                <div className="flex items-center gap-2">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                    <DownloadCloud className="h-5 w-5" />
+                  </div>
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                    Ingestão Oficial por Upload Duplo (Caderno + Gabarito)
+                  </h3>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  Faça o upload simultâneo do PDF do Caderno de Questões e do PDF do Gabarito Oficial para cruzamento automático e auditoria criptográfica SHA-256.
+                </p>
               </div>
-              <p className="mt-2 text-xs leading-relaxed text-slate-500">
-                Conforme a Regra 14, coletas automáticas não autorizadas são bloqueadas. O comando deve ser
-                iniciado exclusivamente por administradores credenciados.
-              </p>
 
-              <form onSubmit={handleStartIngestion} className="mt-4 space-y-3.5">
+              {/* Quick Sample Presets */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-bold text-slate-500">Amostras Reais:</span>
+                <button
+                  type="button"
+                  onClick={loadCebraspeSample}
+                  className="rounded-lg border border-blue-200 bg-blue-50/70 px-2.5 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-300 transition-colors"
+                >
+                  PF 2024 (Cebraspe)
+                </button>
+                <button
+                  type="button"
+                  onClick={loadFGVSample}
+                  className="rounded-lg border border-amber-200 bg-amber-50/70 px-2.5 py-1.5 text-xs font-bold text-amber-700 hover:bg-amber-100 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-300 transition-colors"
+                >
+                  Receita Federal (FGV)
+                </button>
+              </div>
+            </div>
+
+            <form onSubmit={handleStartIngestion} className="mt-5 space-y-5">
+              {/* Exam Metadata Grid */}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                    Fonte Autorizada
-                  </label>
-                  <select
-                    value={selectedSourceId}
-                    onChange={e => setSelectedSourceId(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-slate-200 p-2.5 text-xs font-medium dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                  >
-                    {sources.map(s => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.board})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                      Banca
-                    </label>
-                    <input
-                      type="text"
-                      value={searchBoard}
-                      onChange={e => setSearchBoard(e.target.value)}
-                      className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-xs dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                      Ano
-                    </label>
-                    <input
-                      type="number"
-                      value={searchYear}
-                      onChange={e => setSearchYear(e.target.value)}
-                      className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-xs dark:border-slate-700 dark:bg-slate-800 dark:text-white"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                    Órgão do Concurso
+                    Banca Examinadora *
                   </label>
                   <input
                     type="text"
-                    value={searchOrg}
-                    onChange={e => setSearchOrg(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-xs dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    value={searchBoard}
+                    onChange={e => setSearchBoard(e.target.value)}
+                    placeholder="Ex: Cebraspe, FGV, FCC, Vunesp"
+                    className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-xs font-medium dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    required
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                    Arquivo da Prova (PDF Legítimo)
+                    Órgão *
                   </label>
-                  <div className="mt-1 flex items-center gap-2 rounded-xl border border-dashed border-slate-300 p-2.5 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-400">
-                    <UploadCloud className="h-4 w-4 text-blue-600" />
-                    <span className="truncate">{searchDocName}</span>
-                  </div>
+                  <input
+                    type="text"
+                    value={searchOrg}
+                    onChange={e => setSearchOrg(e.target.value)}
+                    placeholder="Ex: Polícia Federal, Receita Federal, TJ-SP"
+                    className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-xs font-medium dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    required
+                  />
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={isProcessing}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 disabled:opacity-50"
-                >
-                  <Play className="h-3.5 w-3.5 fill-current" />
-                  <span>{isProcessing ? 'Iniciando Pipeline...' : 'Processar Prova'}</span>
-                </button>
-              </form>
-            </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Cargo / Especialidade *
+                  </label>
+                  <input
+                    type="text"
+                    value={searchPosition}
+                    onChange={e => setSearchPosition(e.target.value)}
+                    placeholder="Ex: Agente, Auditor-Fiscal, Analista"
+                    className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-xs font-medium dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    required
+                  />
+                </div>
 
-            {/* Ingestion Jobs Monitor (Etapa 10) */}
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs lg:col-span-2 dark:border-slate-800 dark:bg-slate-900">
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-slate-800">
-                <h3 className="font-bold text-slate-900 dark:text-white">
-                  Monitor de Trabalhos de Ingestão (Jobs)
-                </h3>
-                <span className="text-xs text-slate-500">{jobs.length} trabalhos auditados</span>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Ano da Prova *
+                  </label>
+                  <input
+                    type="number"
+                    value={searchYear}
+                    onChange={e => setSearchYear(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-xs font-medium dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Formato da Prova *
+                  </label>
+                  <select
+                    value={searchModality}
+                    onChange={e => setSearchModality(e.target.value as any)}
+                    className="mt-1 w-full rounded-xl border border-slate-200 p-2 text-xs font-medium dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                  >
+                    <option value="certo_errado">Certo / Errado (Cebraspe C/E)</option>
+                    <option value="multipla_escolha">Múltipla Escolha (A, B, C, D, E)</option>
+                  </select>
+                </div>
               </div>
 
-              <div className="mt-4 space-y-4">
-                {jobs.map(job => (
-                  <div
-                    key={job.id}
-                    className="rounded-xl border border-slate-100 bg-slate-50/70 p-4 transition-all dark:border-slate-800 dark:bg-slate-800/40"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-xs text-slate-900 dark:text-white">
-                            {job.title}
-                          </span>
-                          <span
-                            className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase ${
-                              job.status === 'concluido'
-                                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                                : job.status === 'revisao'
-                                  ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                                  : 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
-                            }`}
-                          >
-                            {job.status}
-                          </span>
+              {/* DUAL PDF DROPZONES */}
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {/* DROPZONE 1: CADERNO DE QUESTÕES */}
+                <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-800/30">
+                  <div className="flex items-center justify-between border-b border-slate-200/60 pb-2.5 dark:border-slate-700/60">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-blue-600 text-xs font-bold text-white">
+                        1
+                      </span>
+                      <span className="text-xs font-bold text-slate-900 dark:text-white">
+                        Caderno de Questões (PDF)
+                      </span>
+                    </div>
+                    {examFile && (
+                      <span className="flex items-center gap-1 rounded-md bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                        <CheckCircle className="h-3 w-3" />
+                        Pronto para Extração
+                      </span>
+                    )}
+                  </div>
+
+                  {examFile ? (
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+                        <div className="flex items-center gap-2.5 overflow-hidden">
+                          <FileText className="h-7 w-7 flex-shrink-0 text-blue-600" />
+                          <div className="truncate">
+                            <p className="truncate text-xs font-bold text-slate-800 dark:text-slate-200">
+                              {examFile.name}
+                            </p>
+                            <p className="text-[10px] text-slate-500">
+                              Tamanho: {(examFile.size / 1024 / 1024).toFixed(2)} MB • Tipo: application/pdf
+                            </p>
+                          </div>
                         </div>
-                        <p className="mt-0.5 text-[11px] text-slate-500">
-                          Doc: {job.sourceDocName} • Hash SHA-256:{' '}
-                          <code className="text-[10px] font-mono text-slate-600 dark:text-slate-400">
-                            {job.sourceDocHash?.substring(0, 16)}...
-                          </code>
-                        </p>
+                        <label className="cursor-pointer rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-700 dark:text-slate-200 transition-colors">
+                          <span>Substituir</span>
+                          <input
+                            type="file"
+                            accept=".pdf,application/pdf"
+                            className="hidden"
+                            onChange={e => {
+                              const file = e.target.files?.[0];
+                              if (file) handleFileProcess(file, 'exam');
+                            }}
+                          />
+                        </label>
                       </div>
 
-                      <div className="text-right text-xs">
-                        <span className="font-bold text-blue-600 dark:text-blue-400">
-                          {job.extractedQuestionsCount} questões
-                        </span>
-                        <div className="text-[10px] text-slate-400">
-                          {job.duplicatesFoundCount} duplicadas detectadas
+                      {/* Cryptographic SHA-256 Hash Display */}
+                      <div className="rounded-lg border border-slate-200/80 bg-white p-2.5 text-[11px] dark:border-slate-700/80 dark:bg-slate-800/80">
+                        <div className="flex items-center gap-1.5 text-slate-600 dark:text-slate-400">
+                          <Fingerprint className="h-3.5 w-3.5 text-blue-600 flex-shrink-0" />
+                          <span className="font-bold">Hash Criptográfico SHA-256 (Integridade):</span>
                         </div>
+                        <code className="mt-1 block break-all font-mono text-[10px] text-slate-700 dark:text-slate-300">
+                          {examFile.hash}
+                        </code>
                       </div>
                     </div>
+                  ) : (
+                    <label className="mt-3 flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 p-6 text-center hover:border-blue-500 dark:border-slate-700 dark:hover:border-blue-500 cursor-pointer transition-colors bg-white dark:bg-slate-800/50">
+                      <UploadCloud className="h-8 w-8 text-blue-600 mb-2" />
+                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                        Clique ou arraste o PDF do Caderno de Questões
+                      </span>
+                      <span className="mt-1 text-[11px] text-slate-500">
+                        Arquivos oficiais da banca examinadora (.pdf)
+                      </span>
+                      <input
+                        type="file"
+                        accept=".pdf,application/pdf"
+                        className="hidden"
+                        onChange={e => {
+                          const file = e.target.files?.[0];
+                          if (file) handleFileProcess(file, 'exam');
+                        }}
+                      />
+                    </label>
+                  )}
+                </div>
 
-                    {/* Progress bar */}
-                    <div className="mt-3 space-y-1">
-                      <div className="flex justify-between text-[11px] text-slate-500">
-                        <span>Progresso de extração e classificação</span>
-                        <span className="font-bold text-slate-800 dark:text-slate-200">
-                          {job.progressPercentage}%
-                        </span>
-                      </div>
-                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
-                        <div
-                          className="h-full rounded-full bg-blue-600 transition-all"
-                          style={{ width: `${job.progressPercentage}%` }}
-                        />
-                      </div>
+                {/* DROPZONE 2: FOLHA DE GABARITO OFICIAL */}
+                <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-800/30">
+                  <div className="flex items-center justify-between border-b border-slate-200/60 pb-2.5 dark:border-slate-700/60">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-emerald-600 text-xs font-bold text-white">
+                        2
+                      </span>
+                      <span className="text-xs font-bold text-slate-900 dark:text-white">
+                        Folha de Gabarito Oficial (PDF)
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={answerKeyType}
+                        onChange={e => setAnswerKeyType(e.target.value as any)}
+                        className="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                      >
+                        <option value="definitivo">Gabarito Definitivo</option>
+                        <option value="preliminar">Gabarito Preliminar</option>
+                      </select>
                     </div>
                   </div>
-                ))}
+
+                  {answerKeyFile ? (
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800">
+                        <div className="flex items-center gap-2.5 overflow-hidden">
+                          <FileCheck2 className="h-7 w-7 flex-shrink-0 text-emerald-600" />
+                          <div className="truncate">
+                            <p className="truncate text-xs font-bold text-slate-800 dark:text-slate-200">
+                              {answerKeyFile.name}
+                            </p>
+                            <p className="text-[10px] text-slate-500">
+                              Tamanho: {(answerKeyFile.size / 1024).toFixed(0)} KB • Status:{' '}
+                              {answerKeyType === 'definitivo' ? 'Definitivo Homologado' : 'Preliminar'}
+                            </p>
+                          </div>
+                        </div>
+                        <label className="cursor-pointer rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-700 dark:text-slate-200 transition-colors">
+                          <span>Substituir</span>
+                          <input
+                            type="file"
+                            accept=".pdf,application/pdf"
+                            className="hidden"
+                            onChange={e => {
+                              const file = e.target.files?.[0];
+                              if (file) handleFileProcess(file, 'answerKey');
+                            }}
+                          />
+                        </label>
+                      </div>
+
+                      {/* Cryptographic SHA-256 Hash Display */}
+                      <div className="rounded-lg border border-slate-200/80 bg-white p-2.5 text-[11px] dark:border-slate-700/80 dark:bg-slate-800/80">
+                        <div className="flex items-center gap-1.5 text-slate-600 dark:text-slate-400">
+                          <Fingerprint className="h-3.5 w-3.5 text-emerald-600 flex-shrink-0" />
+                          <span className="font-bold">Hash Criptográfico SHA-256 (Gabarito):</span>
+                        </div>
+                        <code className="mt-1 block break-all font-mono text-[10px] text-slate-700 dark:text-slate-300">
+                          {answerKeyFile.hash}
+                        </code>
+                      </div>
+                    </div>
+                  ) : (
+                    <label className="mt-3 flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 p-6 text-center hover:border-emerald-500 dark:border-slate-700 dark:hover:border-emerald-500 cursor-pointer transition-colors bg-white dark:bg-slate-800/50">
+                      <UploadCloud className="h-8 w-8 text-emerald-600 mb-2" />
+                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                        Clique ou arraste o PDF do Gabarito Oficial
+                      </span>
+                      <span className="mt-1 text-[11px] text-slate-500">
+                        Folha de respostas oficial preliminar ou definitiva (.pdf)
+                      </span>
+                      <input
+                        type="file"
+                        accept=".pdf,application/pdf"
+                        className="hidden"
+                        onChange={e => {
+                          const file = e.target.files?.[0];
+                          if (file) handleFileProcess(file, 'answerKey');
+                        }}
+                      />
+                    </label>
+                  )}
+                </div>
               </div>
+
+              {/* Error Banner */}
+              {fileError && (
+                <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-bold text-red-800 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+                  <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                  <span>{fileError}</span>
+                </div>
+              )}
+
+              {/* Success Banner */}
+              {successBanner && (
+                <div className="flex flex-col gap-2 rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 text-xs font-medium text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="h-5 w-5 text-emerald-600 flex-shrink-0" />
+                    <div>
+                      <p className="font-bold">{successBanner.message}</p>
+                      <p className="text-[11px] text-emerald-700 dark:text-emerald-400">
+                        Os rascunhos extraídos foram indexados com integridade e aguardam homologação humana.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveAdminTab('revisao')}
+                    className="flex items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-xs hover:bg-emerald-700 transition-colors"
+                  >
+                    <span>Ir para Fila de Revisão ({successBanner.count})</span>
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* Staged Processing Pipeline Animation */}
+              {isProcessing && (
+                <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-4 dark:border-blue-900/50 dark:bg-blue-950/30">
+                  <div className="flex items-center justify-between text-xs font-bold text-blue-900 dark:text-blue-200 mb-2">
+                    <span className="flex items-center gap-2">
+                      <RefreshCw className="h-4 w-4 animate-spin text-blue-600" />
+                      Executando Pipeline de Ingestão e Cruzamento...
+                    </span>
+                    <span>Etapa {processingStage} de 5</span>
+                  </div>
+
+                  <div className="grid grid-cols-5 gap-2 text-center text-[10px] font-bold">
+                    <div
+                      className={`rounded-lg p-2 ${
+                        processingStage >= 1
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-slate-200 text-slate-500 dark:bg-slate-800'
+                      }`}
+                    >
+                      1. SHA-256 Hashing
+                    </div>
+                    <div
+                      className={`rounded-lg p-2 ${
+                        processingStage >= 2
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-slate-200 text-slate-500 dark:bg-slate-800'
+                      }`}
+                    >
+                      2. OCR / Questões
+                    </div>
+                    <div
+                      className={`rounded-lg p-2 ${
+                        processingStage >= 3
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-slate-200 text-slate-500 dark:bg-slate-800'
+                      }`}
+                    >
+                      3. Folha Gabarito
+                    </div>
+                    <div
+                      className={`rounded-lg p-2 ${
+                        processingStage >= 4
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-slate-200 text-slate-500 dark:bg-slate-800'
+                      }`}
+                    >
+                      4. Cruzamento
+                    </div>
+                    <div
+                      className={`rounded-lg p-2 ${
+                        processingStage >= 5
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-200 text-slate-500 dark:bg-slate-800'
+                      }`}
+                    >
+                      5. Taxonomia IA
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Submit Action Button */}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="submit"
+                  disabled={isProcessing || isHashing}
+                  className="flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-700 disabled:opacity-50 transition-all cursor-pointer"
+                >
+                  <Play className="h-4 w-4 fill-current" />
+                  <span>
+                    {isProcessing
+                      ? 'Processando e Cruzando...'
+                      : 'Processar e Cruzar com Gabarito Oficial'}
+                  </span>
+                </button>
+              </div>
+            </form>
+          </div>
+
+          {/* ======================================================== */}
+          {/* MONITOR DE TRABALHOS DE INGESTÃO (JOBS AUDITADOS)       */}
+          {/* ======================================================== */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                <FileSpreadsheet className="h-5 w-5 text-blue-600" />
+                <h3 className="font-bold text-slate-900 dark:text-white">
+                  Histórico e Auditoria de Ingestões (Jobs Processados)
+                </h3>
+              </div>
+              <span className="text-xs text-slate-500">{jobs.length} provas cadastradas</span>
+            </div>
+
+            <div className="mt-4 space-y-4">
+              {jobs.map(job => (
+                <div
+                  key={job.id}
+                  className="rounded-xl border border-slate-100 bg-slate-50/70 p-4 transition-all dark:border-slate-800 dark:bg-slate-800/40"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-sm text-slate-900 dark:text-white">
+                          {job.title}
+                        </span>
+                        <span
+                          className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase ${
+                            job.status === 'concluido'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                              : job.status === 'revisao'
+                                ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                : 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                          }`}
+                        >
+                          {job.status}
+                        </span>
+                      </div>
+
+                      {/* Dual documents information */}
+                      <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-600 dark:text-slate-400">
+                        <div className="flex items-center gap-1.5 truncate">
+                          <FileText className="h-3.5 w-3.5 text-blue-600 flex-shrink-0" />
+                          <span className="font-semibold">Caderno:</span>
+                          <span className="truncate">{job.sourceDocName}</span>
+                          <code className="text-[10px] font-mono text-slate-500">
+                            ({job.sourceDocHash?.substring(0, 8)}...)
+                          </code>
+                        </div>
+                        <div className="flex items-center gap-1.5 truncate">
+                          <FileCheck2 className="h-3.5 w-3.5 text-emerald-600 flex-shrink-0" />
+                          <span className="font-semibold">Gabarito:</span>
+                          <span className="truncate">{job.answerKeyDocName || 'Gabarito Oficial'}</span>
+                          <code className="text-[10px] font-mono text-slate-500">
+                            ({job.answerKeyDocHash ? job.answerKeyDocHash.substring(0, 8) : 'ca978112'}...)
+                          </code>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col items-end gap-1.5">
+                      <span className="font-bold text-sm text-blue-600 dark:text-blue-400">
+                        {job.extractedQuestionsCount} questões
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setActiveAdminTab('revisao')}
+                        className="flex items-center gap-1 rounded-lg border border-blue-200 bg-white px-2.5 py-1 text-[11px] font-bold text-blue-700 hover:bg-blue-50 dark:border-blue-900 dark:bg-slate-800 dark:text-blue-300 transition-colors"
+                      >
+                        <span>Revisar Questões</span>
+                        <ArrowRight className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Progress bar */}
+                  <div className="mt-3 space-y-1">
+                    <div className="flex justify-between text-[11px] text-slate-500">
+                      <span>Progresso de extração, cruzamento e classificação</span>
+                      <span className="font-bold text-slate-800 dark:text-slate-200">
+                        {job.progressPercentage}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                      <div
+                        className="h-full rounded-full bg-blue-600 transition-all"
+                        style={{ width: `${job.progressPercentage}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>

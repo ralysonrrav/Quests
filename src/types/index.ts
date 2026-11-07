@@ -186,6 +186,11 @@ export interface IngestionJob {
   sourceDocName: string;
   sourceDocHash?: string;
   sourceDocUrl?: string;
+  examFileSize?: number;
+  answerKeyDocName?: string;
+  answerKeyDocHash?: string;
+  answerKeyType?: 'definitivo' | 'preliminar';
+  answerKeyFileSize?: number;
   extractedQuestionsCount: number;
   duplicatesFoundCount: number;
   approvedCount: number;
