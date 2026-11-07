@@ -1,11 +1,20 @@
-import { supabase, isSupabaseConfigured, supabaseUrl } from './supabaseClient';
-import { Question, UserProfile, Notebook, Simulation, QuestionAttempt } from '../types';
+import {
+  supabase,
+  isSupabaseConfigured,
+  supabaseUrl,
+  supabaseAnonKey,
+  getActiveSupabaseConfig,
+  updateRuntimeSupabaseConfig,
+  resetRuntimeSupabaseConfig,
+} from './supabaseClient';
+import { Question, UserProfile, Notebook, QuestionAttempt } from '../types';
 
 export interface SupabaseHealthCheckResult {
   isConfigured: boolean;
   status: 'connected' | 'schema_missing' | 'error' | 'not_configured';
   url: string;
   maskedKey: string;
+  source?: 'custom_storage' | 'env_variable' | 'default_project';
   latencyMs?: number;
   message: string;
   details?: string;
@@ -17,18 +26,39 @@ export interface SupabaseHealthCheckResult {
   totalQuestionsCount?: number;
 }
 
+// Helpers for UUID validation to prevent PostgreSQL 22P02 syntax errors
+const isValidUUID = (str: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+
+const DEMO_USER_UUIDS: Record<string, string> = {
+  'user-superadmin-01': 'a0000000-0000-0000-0000-000000000001',
+  'user-admin-01': 'a0000000-0000-0000-0000-000000000002',
+  'user-student-01': 'a0000000-0000-0000-0000-000000000003',
+};
+
+function toValidUUID(id: string): string | null {
+  if (isValidUUID(id)) return id;
+  if (DEMO_USER_UUIDS[id]) return DEMO_USER_UUIDS[id];
+  return null;
+}
+
 export const supabaseService = {
   isConfigured: () => isSupabaseConfigured,
+
+  getConfig: () => getActiveSupabaseConfig(),
+
+  updateConfig: (url: string, key: string) => updateRuntimeSupabaseConfig(url, key),
+
+  resetConfig: () => resetRuntimeSupabaseConfig(),
 
   // -------------------------------------------------------------
   // HEALTH CHECK / CONNECTION TEST
   // -------------------------------------------------------------
   async testConnection(): Promise<SupabaseHealthCheckResult> {
-    const url = supabaseUrl || import.meta.env.VITE_SUPABASE_URL || '';
-    const key = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
-    const maskedKey = key
-      ? `${key.slice(0, 8)}...${key.slice(-6)}`
-      : 'Não informada';
+    const config = getActiveSupabaseConfig();
+    const url = config.url;
+    const key = config.anonKey;
+    const maskedKey = key ? `${key.slice(0, 8)}...${key.slice(-6)}` : 'Não informada';
 
     if (!isSupabaseConfigured || !supabase) {
       return {
@@ -36,14 +66,15 @@ export const supabaseService = {
         status: 'not_configured',
         url: url || 'Não configurada (adicione VITE_SUPABASE_URL no .env)',
         maskedKey,
-        message: 'Credenciais do Supabase não configuradas no arquivo de ambiente (.env ou Vercel).',
-        details: 'Adicione VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para habilitar a conexão persistente com o PostgreSQL.',
+        source: config.source,
+        message: 'Credenciais do Supabase não configuradas no ambiente.',
+        details: 'Adicione VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY no arquivo .env ou no painel da Vercel.',
       };
     }
 
     const start = performance.now();
     try {
-      // Test queries with .limit(1) to detect actual table schema presence
+      // Test queries with .limit(1) against actual public schema tables
       const [qRes, profRes, notebRes] = await Promise.all([
         supabase.from('questions').select('id', { count: 'exact' }).limit(1),
         supabase.from('profiles').select('id').limit(1),
@@ -62,17 +93,18 @@ export const supabaseService = {
         notebooks: !notebRes.error,
       };
 
-      // If tables are missing (PGRST205), credentials and endpoint work, but schema migrations are pending
+      // If tables are missing (PGRST205), credentials work but migration is pending
       if (isQTableMissing || isProfTableMissing || isNotebTableMissing) {
         return {
           isConfigured: true,
           status: 'schema_missing',
           url,
           maskedKey,
+          source: config.source,
           latencyMs,
-          message: 'Conexão com o Supabase estabelecida! Tabelas aguardando migração SQL.',
+          message: 'Conectado ao Supabase! Tabelas aguardando migração SQL inicial.',
           details:
-            'A URL e a Chave Anônima estão respondendo perfeitamente, mas a tabela "questions" ainda não existe no catálogo público do PostgreSQL. Para criá-la com todas as regras RLS e dados iniciais, acesse o SQL Editor do seu projeto Supabase e execute o arquivo "supabase/migrations/20261106000001_initial_schema.sql".',
+            'A URL e a Chave Anônima responderam com sucesso. Para criar as tabelas e regras RLS, execute o arquivo supabase/migrations/20261106000001_initial_schema.sql no SQL Editor do Supabase.',
           tablesFound,
           totalQuestionsCount: 0,
         };
@@ -84,9 +116,10 @@ export const supabaseService = {
           status: 'error',
           url,
           maskedKey,
+          source: config.source,
           latencyMs,
           message: 'Falha ao consultar banco de dados no Supabase.',
-          details: qRes.error.message || qRes.error.details || 'Possível tabela inexistente ou política RLS bloqueando leitura.',
+          details: qRes.error.message || qRes.error.details || 'Possível bloqueio de permissão RLS.',
           tablesFound,
         };
       }
@@ -96,9 +129,10 @@ export const supabaseService = {
         status: 'connected',
         url,
         maskedKey,
+        source: config.source,
         latencyMs,
         message: 'Conexão ativa e tabelas homologadas no Supabase PostgreSQL!',
-        totalQuestionsCount: qRes.count ?? 0,
+        totalQuestionsCount: qRes.count ?? (qRes.data?.length ?? 0),
         tablesFound,
       };
     } catch (err: any) {
@@ -108,6 +142,7 @@ export const supabaseService = {
         status: 'error',
         url,
         maskedKey,
+        source: config.source,
         latencyMs,
         message: 'Erro de rede ou conexão recusada pelo Supabase.',
         details: err?.message || 'Verifique se o URL do projeto e a chave anônima estão corretos.',
@@ -116,7 +151,7 @@ export const supabaseService = {
   },
 
   // -------------------------------------------------------------
-  // QUESTIONS & OPTIONS
+  // QUESTIONS & OPTIONS (Using exact database schema columns)
   // -------------------------------------------------------------
   async getQuestions(): Promise<Question[] | null> {
     if (!supabase) return null;
@@ -126,42 +161,42 @@ export const supabaseService = {
         .select(`
           id,
           code,
-          board:institution,
-          organization:agency,
-          examName:exam_name,
+          board,
+          organization,
+          exam_name,
           position,
           year,
-          educationLevel:education_level,
-          discipline,
-          topic,
-          subtopic,
+          education_level,
           modality,
           difficulty,
           statement,
-          correctOptionId:correct_option,
-          keyStatus:key_status,
-          explanationText:explanation_text,
-          explanationAuthor:explanation_author,
-          legalBasis:legal_basis,
-          totalAttempts:total_attempts,
-          correctAttempts:correct_attempts,
-          isPublished:status,
+          support_text,
+          correct_option_id,
+          key_status,
+          explanation_author,
+          explanation_role,
+          explanation_text,
+          explanation_legal_basis,
+          total_attempts,
+          correct_attempts,
+          is_published,
           options:question_options (
-            id:option_id,
-            text,
-            isCorrect:is_correct
+            id,
+            letter_id,
+            option_text,
+            is_correct,
+            percentage_chosen
           )
         `)
-        .eq('status', 'PUBLISHED')
         .order('created_at', { ascending: false });
 
       if (qErr) {
-        console.warn('Erro ao carregar questões do Supabase:', qErr);
+        console.warn('Aviso ao consultar questões no Supabase:', qErr.message);
         return null;
       }
 
       if (!questionsData || questionsData.length === 0) {
-        return null;
+        return [];
       }
 
       return questionsData.map((row: any) => ({
@@ -169,45 +204,46 @@ export const supabaseService = {
         code: row.code,
         board: row.board,
         organization: row.organization,
-        examName: row.examName,
-        position: row.position,
-        year: Number(row.year),
-        educationLevel: row.educationLevel,
-        discipline: row.discipline,
-        topic: row.topic,
-        subtopic: row.subtopic,
-        modality: row.modality,
-        difficulty: row.difficulty,
+        examName: row.exam_name || 'Concurso Público',
+        position: row.position || 'Geral',
+        year: Number(row.year) || 2024,
+        educationLevel: row.education_level || 'superior',
+        discipline: 'Geral',
+        topic: 'Conhecimentos Específicos',
+        subtopic: 'Tópicos do Edital',
+        modality: row.modality || 'multipla_escolha',
+        difficulty: row.difficulty || 'medio',
         statement: row.statement,
-        correctOptionId: row.correctOptionId,
-        keyStatus: row.keyStatus,
+        supportText: row.support_text || undefined,
+        correctOptionId: row.correct_option_id,
+        keyStatus: row.key_status || 'valida',
         options: (row.options || []).map((o: any) => ({
-          id: o.id,
-          text: o.text,
-          isCorrect: o.isCorrect,
-          percentageChosen: o.isCorrect ? 75 : 25,
+          id: o.letter_id || o.id,
+          text: o.option_text || '',
+          isCorrect: Boolean(o.is_correct),
+          percentageChosen: Number(o.percentage_chosen) || (o.is_correct ? 75 : 25),
         })),
         explanation: {
-          author: row.explanationAuthor || 'Prof. Questões Brasil',
-          role: 'Especialista',
-          text: row.explanationText || 'Gabarito oficial homologado.',
-          legalBasis: row.legalBasis || '',
+          author: row.explanation_author || 'Prof. Questões Brasil',
+          role: row.explanation_role || 'Especialista',
+          text: row.explanation_text || 'Gabarito oficial homologado.',
+          legalBasis: row.explanation_legal_basis || '',
           updatedAt: new Date().toISOString(),
         },
-        totalAttempts: row.totalAttempts || 0,
-        correctAttempts: row.correctAttempts || 0,
-        isPublished: true,
+        totalAttempts: row.total_attempts || 0,
+        correctAttempts: row.correct_attempts || 0,
+        isPublished: Boolean(row.is_published),
         createdAt: new Date().toISOString(),
         reviewStatus: 'publicada',
       }));
-    } catch (e) {
-      console.warn('Exceção ao consultar Supabase:', e);
+    } catch (e: any) {
+      console.warn('Exceção ao consultar questões no Supabase:', e?.message || e);
       return null;
     }
   },
 
   // -------------------------------------------------------------
-  // RECORD QUESTION ATTEMPT / RESOLUTION
+  // RECORD QUESTION ATTEMPT (question_attempts table)
   // -------------------------------------------------------------
   async recordAttempt(params: {
     userId: string;
@@ -217,13 +253,21 @@ export const supabaseService = {
     timeSpentSeconds: number;
   }) {
     if (!supabase) return null;
+    const userUuid = toValidUUID(params.userId);
+    const questionUuid = toValidUUID(params.questionId);
+
+    // If IDs are not UUIDs (e.g. mock data 'q-ceb-001'), skip DB insert cleanly
+    if (!userUuid || !questionUuid) {
+      return null;
+    }
+
     try {
       const { data, error } = await supabase
-        .from('question_resolutions')
+        .from('question_attempts')
         .insert({
-          user_id: params.userId,
-          question_id: params.questionId,
-          chosen_option: params.selectedOptionId,
+          user_id: userUuid,
+          question_id: questionUuid,
+          selected_option_id: params.selectedOptionId,
           is_correct: params.isCorrect,
           time_spent_seconds: params.timeSpentSeconds,
         })
@@ -231,21 +275,23 @@ export const supabaseService = {
         .single();
 
       if (error) {
-        console.warn('Erro ao salvar resolução no Supabase:', error);
+        console.warn('Aviso ao registrar tentativa no Supabase:', error.message);
         return null;
       }
       return data;
-    } catch (e) {
-      console.warn('Exceção ao salvar tentativa no Supabase:', e);
+    } catch {
       return null;
     }
   },
 
   // -------------------------------------------------------------
-  // USER NOTEBOOKS
+  // USER NOTEBOOKS (notebooks table)
   // -------------------------------------------------------------
   async getNotebooks(userId: string): Promise<Notebook[] | null> {
     if (!supabase) return null;
+    const userUuid = toValidUUID(userId);
+    if (!userUuid) return null;
+
     try {
       const { data, error } = await supabase
         .from('notebooks')
@@ -260,11 +306,11 @@ export const supabaseService = {
             question_id
           )
         `)
-        .eq('user_id', userId)
+        .eq('user_id', userUuid)
         .order('created_at', { ascending: false });
 
       if (error) {
-        console.warn('Erro ao carregar cadernos do Supabase:', error);
+        console.warn('Aviso ao consultar cadernos no Supabase:', error.message);
         return null;
       }
 
@@ -280,8 +326,7 @@ export const supabaseService = {
         createdAt: nb.created_at,
         updatedAt: nb.updated_at,
       }));
-    } catch (e) {
-      console.warn('Exceção ao consultar cadernos:', e);
+    } catch {
       return null;
     }
   },
@@ -293,11 +338,14 @@ export const supabaseService = {
     color?: string;
   }): Promise<Notebook | null> {
     if (!supabase) return null;
+    const userUuid = toValidUUID(params.userId);
+    if (!userUuid) return null;
+
     try {
       const { data, error } = await supabase
         .from('notebooks')
         .insert({
-          user_id: params.userId,
+          user_id: userUuid,
           title: params.title,
           description: params.description,
           color: params.color || '#2563eb',
@@ -306,7 +354,7 @@ export const supabaseService = {
         .single();
 
       if (error) {
-        console.warn('Erro ao criar caderno no Supabase:', error);
+        console.warn('Aviso ao criar caderno no Supabase:', error.message);
         return null;
       }
 
@@ -320,35 +368,37 @@ export const supabaseService = {
         createdAt: data.created_at,
         updatedAt: data.updated_at,
       };
-    } catch (e) {
-      console.warn('Exceção ao criar caderno:', e);
+    } catch {
       return null;
     }
   },
 
-  async addQuestionToNotebook(notebookId: string, questionId: string) {
+  async addQuestionToNotebook(notebookId: string, questionId: string): Promise<boolean> {
     if (!supabase) return false;
+    const nbUuid = toValidUUID(notebookId);
+    const qUuid = toValidUUID(questionId);
+    if (!nbUuid || !qUuid) return false;
+
     try {
       const { error } = await supabase
         .from('notebook_questions')
         .insert({
-          notebook_id: notebookId,
-          question_id: questionId,
+          notebook_id: nbUuid,
+          question_id: qUuid,
         });
 
       if (error) {
-        console.warn('Erro ao vincular questão ao caderno:', error);
+        console.warn('Aviso ao vincular questão ao caderno:', error.message);
         return false;
       }
       return true;
-    } catch (e) {
-      console.warn('Exceção ao vincular questão:', e);
+    } catch {
       return false;
     }
   },
 
   // -------------------------------------------------------------
-  // AUTHENTICATION & USER PROFILE
+  // USER PROFILES
   // -------------------------------------------------------------
   async getCurrentUserProfile(): Promise<UserProfile | null> {
     if (!supabase) return null;
@@ -364,26 +414,19 @@ export const supabaseService = {
 
       if (!profile) return null;
 
-      const { data: roleRow } = await supabase
-        .from('user_roles')
-        .select('role')
-        .eq('user_id', authData.user.id)
-        .single();
-
       return {
         id: profile.id,
         email: profile.email,
         name: profile.name,
         nickname: profile.nickname || profile.name,
-        role: roleRow?.role || 'USUARIO',
+        role: profile.role || 'USUARIO',
         avatarUrl: profile.avatar_url,
-        isPublicRanking: !profile.hide_ranking,
+        isPublicRanking: profile.is_public_ranking ?? true,
         createdAt: profile.created_at,
         lastLoginAt: profile.last_login_at,
         isActive: profile.status === 'ACTIVE',
       };
-    } catch (e) {
-      console.warn('Exceção ao obter perfil:', e);
+    } catch {
       return null;
     }
   },
